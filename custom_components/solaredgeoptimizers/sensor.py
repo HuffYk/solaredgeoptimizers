@@ -89,7 +89,7 @@ async def async_setup_entry(
     optimizer_tasks = []
     for inv_idx, inverter in enumerate(site.inverters, start=1):
         _LOGGER.info("Adding all optimizers from inverter: %s", inv_idx)
-        for str_idx, string in enumerate(inverter.strings, start=1):
+        for str_idx, string in enumerate(inverter.strings, start=0):
             for opt_idx, optimizer in enumerate(string.optimizers, start=1):
                 optimizer_tasks.append((optimizer, inverter, string, inv_idx, str_idx, opt_idx))
 
@@ -147,7 +147,7 @@ async def async_setup_entry(
     site_struct = coordinator._site_structure
     if site_struct:
         for inv_idx, inverter in enumerate(site_struct.inverters, start=1):
-            for str_idx, string in enumerate(inverter.strings, start=1):
+            for str_idx, string in enumerate(inverter.strings, start=0):
                 string_aggregated = SolarEdgeAggregatedData(
                     entity_id=f"string_{string.stringId}",
                     entity_type="string",
