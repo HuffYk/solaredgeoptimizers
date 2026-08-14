@@ -2,7 +2,13 @@
   "config": {
     "title": "SolarEdge Optimizers Data",
     "title_entry": "SolarEdge Site %(siteid)s",
-    "abort": {"already_configured": "Apparaat is al geconfigureerd"},
+    "abort": {
+      "already_configured": "Apparaat is al geconfigureerd",
+      "reauth_successful": "Herauthenticatie geslaagd",
+      "reauth_entry_missing": "Configuratie-item voor herauthenticatie niet gevonden.",
+      "reconfigure_successful": "Credentials updated successfully",
+      "reconfigure_entry_missing": "Reconfigure could not find the config entry."
+    },
     "error": {
       "cannot_connect": "Kan niet verbinden",
       "invalid_auth": "Ongeldige authenticatie",
@@ -12,34 +18,128 @@
       "user": {
         "data": {
           "siteid": "Site nummer",
-          "password": "Wachtwoord",
           "username": "Gebruikersnaam (Email)",
+          "password": "Wachtwoord",
           "entity_id_prefix": "Entity-ID-voorvoegsel (optioneel)",
-          "include_site_id_in_entity_id": "Site-ID opnemen in entiteits-ID"
+          "include_site_id_in_entity_id": "Site-ID opnemen in entiteits-ID",
+          "use_solaredge_one": "SolarEdge One gebruiken"
+        }
+      },
+      "reauth_confirm": {
+        "title": "SolarEdge Optimizers opnieuw verifiëren",
+        "description": "Inloggegevens voor {title} zijn niet meer geldig. Voer uw SolarEdge gebruikersnaam en wachtwoord in.",
+        "data": {
+          "username": "Gebruikersnaam",
+          "password": "Wachtwoord"
+        }
+      },
+      "reconfigure": {
+        "title": "Update SolarEdge credentials",
+        "description": "Enter your SolarEdge username and password for {title}. Use Configure for entity naming and API options only.",
+        "data": {
+          "username": "Username",
+          "password": "Password"
+        }
+      }
+    },
+    "initiate_flow": {
+      "reconfigure": "Update credentials"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "{title} opnieuw configureren",
+        "description": "Huidig voorvoegsel: {current_entity_id_prefix}. Laat het veld leeg voor geen voorvoegsel. Opslaan laadt de integratie opnieuw: entity ID's en unique_ids kunnen veranderen, waardoor geschiedenis en statistieken van bestaande entiteiten verloren kunnen gaan. Overweeg eerst een back-up of export van gegevens.",
+        "data": {
+          "entity_id_prefix": "Entiteits-ID-voorvoegsel (optioneel)",
+          "include_site_id_in_entity_id": "Site-ID opnemen in entiteits-ID",
+          "use_solaredge_one": "SolarEdge One gebruiken"
         }
       }
     }
   },
   "entity": {
     "sensor": {
-      "power": {"name": "Vermogen"},
-      "voltage": {"name": "Spanning"},
-      "current": {"name": "Stroom"},
-      "optimizer_voltage": {"name": "Optimizerspanning"},
-      "lifetime_energy": {"name": "Levensduur energie"},
-      "last_measurement": {"name": "Laatste meting"},
-      "last_polled": {"name": "Laatst opgehaald"},
-      "current_average": {"name": "Stroom (gemiddeld)"},
-      "voltage_average": {"name": "Spanning (gemiddeld)"},
-      "optimizer_count": {"name": "Aantal optimizers"},
-      "string_count": {"name": "Aantal strings"},
-      "inverter_count": {"name": "Aantal omvormers"}
+      "power": {
+        "name": "Vermogen"
+      },
+      "voltage": {
+        "name": "Spanning"
+      },
+      "current": {
+        "name": "Stroom"
+      },
+      "optimizer_voltage": {
+        "name": "Optimizerspanning"
+      },
+      "temperature": {
+        "name": "Temperatuur"
+      },
+      "lifetime_energy": {
+        "name": "Levensduur energie"
+      },
+      "last_measurement": {
+        "name": "Laatste meting"
+      },
+      "last_polled": {
+        "name": "Laatst opgehaald"
+      },
+      "current_average": {
+        "name": "Stroom (gemiddeld)"
+      },
+      "voltage_average": {
+        "name": "Spanning (gemiddeld)"
+      },
+      "optimizer_count": {
+        "name": "Aantal optimizers"
+      },
+      "string_count": {
+        "name": "Aantal strings"
+      },
+      "inverter_count": {
+        "name": "Aantal omvormers"
+      },
+      "obtained_from": {
+        "name": "Verkregen van"
+      },
+      "status": {
+        "name": "Status"
+      },
+      "azimuth": {
+        "name": "Azimut"
+      },
+      "tilt": {
+        "name": "Hellingshoek"
+      },
+      "installation_date": {
+        "name": "Installatiedatum"
+      },
+      "peak_power": {
+        "name": "Piekvermogen"
+      },
+      "max_active_power": {
+        "name": "Max. actief vermogen"
+      },
+      "state_attributes": {
+        "panel_type": {
+          "name": "Paneeltype"
+        }
+      }
     }
   },
   "device": {
-    "site_device": {"name": "Site {site_id}"},
-    "inverter_device": {"name": "Omvormer {display_name}"},
-    "string_device": {"name": "String {display_name}"},
-    "optimizer_device": {"name": "Optimizer {display_name}"}
+    "site_device": {
+      "name": "Site {site_id}"
+    },
+    "inverter_device": {
+      "name": "Omvormer {display_name}"
+    },
+    "string_device": {
+      "name": "String {display_name}"
+    },
+    "optimizer_device": {
+      "name": "Optimizer {display_name}"
+    }
   }
 }

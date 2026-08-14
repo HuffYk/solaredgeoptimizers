@@ -2,7 +2,13 @@
   "config": {
     "title": "SolarEdge Optimizers Data",
     "title_entry": "SolarEdge Site %(siteid)s",
-    "abort": {"already_configured": "Dispositivo già configurato"},
+    "abort": {
+      "already_configured": "Dispositivo già configurato",
+      "reauth_successful": "Ri-autenticazione riuscita",
+      "reauth_entry_missing": "Voce di configurazione per la ri-autenticazione non trovata.",
+      "reconfigure_successful": "Credentials updated successfully",
+      "reconfigure_entry_missing": "Reconfigure could not find the config entry."
+    },
     "error": {
       "cannot_connect": "Connessione fallita",
       "invalid_auth": "Autenticazione non valida",
@@ -12,34 +18,128 @@
       "user": {
         "data": {
           "siteid": "ID sito",
-          "password": "Password",
           "username": "Nome utente (email)",
+          "password": "Password",
           "entity_id_prefix": "Prefisso ID entità (opzionale)",
-          "include_site_id_in_entity_id": "Includi ID sito nell'ID entità"
+          "include_site_id_in_entity_id": "Includi ID sito nell'ID entità",
+          "use_solaredge_one": "Usa SolarEdge One"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Ri-autentica SolarEdge Optimizers",
+        "description": "Le credenziali per {title} non sono più valide. Inserisci nome utente e password SolarEdge.",
+        "data": {
+          "username": "Nome utente",
+          "password": "Password"
+        }
+      },
+      "reconfigure": {
+        "title": "Update SolarEdge credentials",
+        "description": "Enter your SolarEdge username and password for {title}. Use Configure for entity naming and API options only.",
+        "data": {
+          "username": "Username",
+          "password": "Password"
+        }
+      }
+    },
+    "initiate_flow": {
+      "reconfigure": "Update credentials"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Riconfigura {title}",
+        "description": "Prefisso attuale: {current_entity_id_prefix}. Lasciare vuoto il campo per nessun prefisso. Il salvataggio ricaricherà l'integrazione: gli entity ID e i unique_ids possono cambiare, quindi cronologia e statistiche delle entità esistenti possono andare perse. Valutare backup o esportazione dati prima.",
+        "data": {
+          "entity_id_prefix": "Prefisso ID entità (opzionale)",
+          "include_site_id_in_entity_id": "Includi ID sito nell'ID entità",
+          "use_solaredge_one": "Usa SolarEdge One"
         }
       }
     }
   },
   "entity": {
     "sensor": {
-      "power": {"name": "Potenza"},
-      "voltage": {"name": "Tensione"},
-      "current": {"name": "Corrente"},
-      "optimizer_voltage": {"name": "Tensione ottimizzatore"},
-      "lifetime_energy": {"name": "Energia totale"},
-      "last_measurement": {"name": "Ultima misurazione"},
-      "last_polled": {"name": "Ultimo aggiornamento"},
-      "current_average": {"name": "Corrente (media)"},
-      "voltage_average": {"name": "Tensione (media)"},
-      "optimizer_count": {"name": "Numero ottimizzatori"},
-      "string_count": {"name": "Numero stringhe"},
-      "inverter_count": {"name": "Numero inverter"}
+      "power": {
+        "name": "Potenza"
+      },
+      "voltage": {
+        "name": "Tensione"
+      },
+      "current": {
+        "name": "Corrente"
+      },
+      "optimizer_voltage": {
+        "name": "Tensione ottimizzatore"
+      },
+      "temperature": {
+        "name": "Temperatura"
+      },
+      "lifetime_energy": {
+        "name": "Energia totale"
+      },
+      "last_measurement": {
+        "name": "Ultima misurazione"
+      },
+      "last_polled": {
+        "name": "Ultimo aggiornamento"
+      },
+      "current_average": {
+        "name": "Corrente (media)"
+      },
+      "voltage_average": {
+        "name": "Tensione (media)"
+      },
+      "optimizer_count": {
+        "name": "Numero ottimizzatori"
+      },
+      "string_count": {
+        "name": "Numero stringhe"
+      },
+      "inverter_count": {
+        "name": "Numero inverter"
+      },
+      "obtained_from": {
+        "name": "Ottenuto da"
+      },
+      "status": {
+        "name": "Stato"
+      },
+      "azimuth": {
+        "name": "Azimut"
+      },
+      "tilt": {
+        "name": "Inclinazione"
+      },
+      "installation_date": {
+        "name": "Data di installazione"
+      },
+      "peak_power": {
+        "name": "Potenza di picco"
+      },
+      "max_active_power": {
+        "name": "Potenza attiva max"
+      },
+      "state_attributes": {
+        "panel_type": {
+          "name": "Tipo di pannello"
+        }
+      }
     }
   },
   "device": {
-    "site_device": {"name": "Sito {site_id}"},
-    "inverter_device": {"name": "Inverter {display_name}"},
-    "string_device": {"name": "Stringa {display_name}"},
-    "optimizer_device": {"name": "Ottimizzatore {display_name}"}
+    "site_device": {
+      "name": "Sito {site_id}"
+    },
+    "inverter_device": {
+      "name": "Inverter {display_name}"
+    },
+    "string_device": {
+      "name": "Stringa {display_name}"
+    },
+    "optimizer_device": {
+      "name": "Ottimizzatore {display_name}"
+    }
   }
 }

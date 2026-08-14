@@ -1,109 +1,435 @@
-"""SolarEdge Optimizers integration for Home Assistant."""
-import logging
+"""
+SolarEdge Optimizers Integration - Entry Point (__init__.py)
 
-from requests import ConnectTimeout, HTTPError
+This module serves as the main entry point for the Home Assistant integration. It handles:
+
+- Config entry setup and teardown (async_setup_entry, async_unload_entry)
+- API client initialization using the dual API wrapper (SolarEdge One + legacy fallback)
+- Data coordinator creation for polling optimizer data at regular intervals
+- Platform registration (sensor platform) for exposing optimizer data as HA entities
+- Migration of legacy configuration options (use_solaredge_one default; repair unformatted
+  config entry titles containing literal ``%(siteid)s``)
+- Entity and device registry cleanup when the integration is removed or reloaded
+- Timezone configuration for proper date/time parsing of API responses
+
+The integration authenticates with the SolarEdge Monitoring Portal using site credentials,
+retrieves the site layout (inverters, strings, optimizers), and creates sensor entities
+for power, voltage, current, maximum daily optimizer temperature, energy, and status at optimizer, string,
+inverter, and site levels. Site level includes installation date and peak power when
+using the SolarEdge One API; inverter level includes max active power (kW) from the
+layout. The coordinator aggregates lifetime energy with portal overrides (dashboard /
+by-inverter) and guards string- and inverter-level overrides when portal Wh is 0-agg or
+far exceeds optimizer/string sums; last-measurement rollups at string/inverter/site use
+active devices only. On unload or config entry removal, ``async_unload_entry`` /
+``async_remove_entry`` call ``api.close()`` so legacy thread-local sessions and dual API
+clients release connections (file descriptors).
+
+Device registry: ``coordinator.ensure_devices_registered()`` runs after the first coordinator
+refresh and again before the sensor platform is forwarded, so site/inverter/string devices
+exist before entities are added. Entities link to those devices by identifier only
+(``device_ids.link_device_info``), avoiding ``via_device`` warnings on startup.
+
+The sensor platform registers per-optimizer entities with ``has_entity_name`` disabled so
+``entity_id`` matches the path-based ``suggested_object_id`` (e.g. ``sensor.power_1_1_1``)
+without Home Assistant prepending the optimizer device slug; friendly names use short
+translated sensor labels only (device name shows optimizer position). Optimizer devices are
+created in the sensor platform before entities are added; ``via_device`` uses the same string
+device identifier as the coordinator (including duplicate/portal suffixes on string keys).
+On large sites, entities are added
+in batches (``ENTITY_ADD_BATCH_SIZE``) with event-loop yields so startup does not flood the
+entity registry or websocket bus; ``coordinator.async_update_listeners()`` (sync) runs after
+the last batch; optimizer sensors reapply coordinator data in ``async_added_to_hass`` when
+the coordinator already has data so sensors are not stuck at **unknown** until the next poll.
+Missing-optimizer backfill at setup prefers One batch API and otherwise caps concurrency.
+
+v2.4.19+: inactive/replaced optimizers with empty portal measurements log at DEBUG only;
+lightweight polling samples active optimizers only. Unload/removal logs a single INFO when
+the dual API closes both backends (backend close summaries are DEBUG when invoked via dual API).
+
+v2.4.20+: re-authentication UX — user-initiated credential update via config-flow Reconfigure;
+runtime auth failures during coordinator polling raise ConfigEntryAuthFailed (not only at setup);
+credential validation and removal paths still close temporary dual API clients in finally blocks.
+
+v2.4.21+: light-check auth failures also raise ConfigEntryAuthFailed; light-check samples rotate;
+legacy ``_doRequest`` timeouts; OAuth DEBUG URL redaction + refresh_token; setup fan-out cap;
+float hardening; inverter/zero-agg lifetime guards; dashboard-preferred site lifetime;
+``manifest.json`` ``requirements`` emptied (jsonfinder removed; legacy decode is stdlib-only);
+unload calls coordinator ``async_shutdown`` before API ``close()`` so in-flight refreshes finish;
+legacy close waits for in-flight HTTP before releasing sessions.
+"""
+import logging
+from typing import Any
+
+from requests import ConnectTimeout, HTTPError, RequestException
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.util import dt as dt_util
 
-# AJT: 10-Jan-2025: Changed from absolute import to relative import to use local solaredgeoptimizers.py instead of site-packages version
-from .solaredgeoptimizers import solaredgeoptimizers
+from .api_dual import SolarEdgeDualAPI
 from .const import (
     DOMAIN,
     LOGGER,
+    CONF_SITE_ID,
+    CONF_USE_SOLAREDGE_ONE,
+    UNFORMATTED_CONFIG_TITLE_MARKER,
+    format_config_entry_title,
 )
 from .coordinator import MyCoordinator
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up SolarEdge Optimizers Data from a config entry."""
-
-    # AJT: 24-Jan-2026: Add detailed debugging for initial setup issues
-    LOGGER.info("SolarEdge Optimizers: Starting setup for config entry: %s", entry.entry_id)
-    LOGGER.info("SolarEdge Optimizers: Config data - siteid: %s, username: %s",
-               entry.data.get("siteid", "MISSING"), entry.data.get("username", "MISSING"))
-
-    # AJT: 18-Jan-2026: Get Home Assistant's configured timezone for date parsing
-    ha_timezone = dt_util.get_time_zone(hass.config.time_zone)
-    # AJT: 18-Jan-2026: Log timezone configuration for debugging
+async def _migrate_config_entry_title(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Repair config entry titles that still contain the unsubstituted %(siteid)s template."""
+    title = entry.title or ""
+    if UNFORMATTED_CONFIG_TITLE_MARKER not in title:
+        return
+    siteid = (entry.data.get("siteid") or entry.data.get(CONF_SITE_ID) or "").strip()
+    if not siteid:
+        LOGGER.warning(
+            "SolarEdge Optimizers: Config entry %s has unformatted title %r but no site ID to repair with",
+            entry.entry_id,
+            title,
+        )
+        return
+    new_title = format_config_entry_title(title, siteid)
+    if new_title == title:
+        new_title = f"SolarEdge Site {siteid}"
+    hass.config_entries.async_update_entry(entry, title=new_title)
     LOGGER.info(
-        "SolarEdge Optimizers: Using timezone '%s' (HA config: '%s') for date parsing",
-        str(ha_timezone),
-        hass.config.time_zone
+        "SolarEdge Optimizers: Repaired unformatted config entry title for entry %s (%r -> %r)",
+        entry.entry_id,
+        title,
+        new_title,
     )
 
+
+async def _migrate_use_solaredge_one(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Ensure use_solaredge_one exists in data or options (default True). Reinstated for legacy-only option."""
+    data = dict(entry.data)
+    options = dict(entry.options)
+    changed = False
+    default_one = True
+    if CONF_USE_SOLAREDGE_ONE not in data and CONF_USE_SOLAREDGE_ONE not in options:
+        options[CONF_USE_SOLAREDGE_ONE] = default_one
+        changed = True
+    if changed:
+        hass.config_entries.async_update_entry(entry, data=data, options=options)
+        LOGGER.info("SolarEdge Optimizers: Migrated config entry %s (set %s=%s)", entry.entry_id, CONF_USE_SOLAREDGE_ONE, default_one)
+
+
+def _log_setup_context(hass: HomeAssistant, entry: ConfigEntry, use_solaredge_one: bool, ha_timezone) -> None:
+    """Log setup context details at debug level."""
     if LOGGER.isEnabledFor(logging.DEBUG):
-        LOGGER.debug("SolarEdge Optimizers: Creating API instance")
-    api = solaredgeoptimizers(
-        entry.data["siteid"],
-        entry.data["username"],
-        entry.data["password"],
-        ha_timezone,
-        language=hass.config.language,
-    )
+        LOGGER.debug(
+            "SolarEdge Optimizers: Setup context entry=%s site=%s use_solaredge_one=%s timezone=%s (HA=%s)",
+            entry.entry_id,
+            entry.data.get("siteid", "?"),
+            use_solaredge_one,
+            str(ha_timezone),
+            hass.config.time_zone,
+        )
 
+
+async def _async_check_login(hass: HomeAssistant, api: SolarEdgeDualAPI) -> int:
+    """Run login check and normalize network/data failures to ConfigEntryNotReady."""
     if LOGGER.isEnabledFor(logging.DEBUG):
         LOGGER.debug("SolarEdge Optimizers: Starting login check")
     try:
         http_result_code = await hass.async_add_executor_job(api.check_login)
-        LOGGER.info("SolarEdge Optimizers: Login check result: %s", http_result_code)
-    except (ConnectTimeout, HTTPError) as ex:
-        LOGGER.error("SolarEdge Optimizers: Could not retrieve details from SolarEdge API: %s", ex)
+    except ConnectTimeout as ex:
+        LOGGER.error("SolarEdge Optimizers: Connection timeout during login check: %s", ex)
         raise ConfigEntryNotReady from ex
-    except Exception as ex:
-        LOGGER.error("SolarEdge Optimizers: Unexpected error during login check: %s", ex)
+    except HTTPError as ex:
+        LOGGER.error("SolarEdge Optimizers: HTTP error during login check: %s", ex)
+        raise ConfigEntryNotReady from ex
+    except RequestException as ex:
+        LOGGER.error("SolarEdge Optimizers: Network error during login check: %s", ex)
+        raise ConfigEntryNotReady from ex
+    except (ValueError, KeyError, TypeError) as ex:
+        LOGGER.error("SolarEdge Optimizers: Data parsing error during login check: %s", ex)
         raise ConfigEntryNotReady from ex
 
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        LOGGER.debug("SolarEdge Optimizers: Login check result: %s", http_result_code)
+    return http_result_code
+
+
+def _validate_login_status(http_result_code: int) -> None:
+    """Validate login status and raise setup exceptions when required."""
+    if http_result_code == 401:
+        LOGGER.error("SolarEdge Optimizers: Authentication failed (401); please re-authenticate")
+        raise ConfigEntryAuthFailed("Invalid or expired credentials; please re-authenticate")
     if http_result_code != 200:
         LOGGER.error("SolarEdge Optimizers: Missing details data in SolarEdge response (status: %s)", http_result_code)
         raise ConfigEntryNotReady
 
-    if LOGGER.isEnabledFor(logging.DEBUG):
-        LOGGER.debug("SolarEdge Optimizers: Login successful, creating coordinator")
 
-    hass.data.setdefault(DOMAIN, {})
-
-    # AJT: 10-Jan-2025: Pass config_entry to coordinator to enable async_config_entry_first_refresh()
-    if LOGGER.isEnabledFor(logging.DEBUG):
-        LOGGER.debug("SolarEdge Optimizers: Creating coordinator instance")
-    coordinator = MyCoordinator(hass, api, True, entry)
-
-    # Fetch initial data so we have data when entities subscribe
-    #
-    # If the refresh fails, async_config_entry_first_refresh will
-    # raise ConfigEntryNotReady and setup will try again later
+async def _async_initial_refresh(coordinator: MyCoordinator) -> None:
+    """Perform first coordinator refresh and keep existing exception behavior."""
     if LOGGER.isEnabledFor(logging.DEBUG):
         LOGGER.debug("SolarEdge Optimizers: Starting initial coordinator refresh")
     try:
         await coordinator.async_config_entry_first_refresh()
         LOGGER.info("SolarEdge Optimizers: Initial coordinator refresh completed successfully")
-    except Exception as ex:
-        LOGGER.error("SolarEdge Optimizers: Initial coordinator refresh failed: %s", ex)
+    except (ConnectTimeout, HTTPError, RequestException) as ex:
+        LOGGER.error("SolarEdge Optimizers: Network error during initial coordinator refresh: %s", ex)
+        raise
+    except (ValueError, KeyError, TypeError) as ex:
+        LOGGER.error("SolarEdge Optimizers: Data parsing error during initial coordinator refresh: %s", ex)
+        raise
+    except ConfigEntryNotReady:
+        raise
+    except RuntimeError as ex:
+        LOGGER.error("SolarEdge Optimizers: Runtime error during initial coordinator refresh: %s", ex)
         raise
 
+
+async def _async_forward_platforms(hass: HomeAssistant, entry: ConfigEntry, coordinator: MyCoordinator) -> None:
+    """Store coordinator, ensure devices, and forward setup to integration platforms."""
     hass.data[DOMAIN][entry.entry_id] = coordinator
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        LOGGER.debug(
+            "SolarEdge Optimizers: Stored coordinator for entry %s, forwarding to platforms: %s",
+            entry.entry_id,
+            PLATFORMS,
+        )
+    if coordinator.ensure_devices_registered() and LOGGER.isEnabledFor(logging.DEBUG):
+        LOGGER.debug(
+            "SolarEdge Optimizers: Device registry ready before sensor platform (entry %s)",
+            entry.entry_id,
+        )
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except Exception:  # pylint: disable=broad-except
+        # Platform setup failed; remove partial state so caller closes API.
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        raise
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    return True
+async def _async_close_api_after_setup_failure(hass: HomeAssistant, api: SolarEdgeDualAPI, entry_id: str) -> None:
+    """Close API after setup failure; never raise from cleanup path."""
+    try:
+        await hass.async_add_executor_job(api.close)
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            LOGGER.debug(
+                "SolarEdge Optimizers: Closed API after setup failure for entry %s",
+                entry_id,
+            )
+    except Exception as e:  # pylint: disable=broad-except
+        LOGGER.warning(
+            "SolarEdge Optimizers: Error closing API after setup failure: %s",
+            e,
+        )
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up SolarEdge Optimizers Data from a config entry."""
+    await _migrate_use_solaredge_one(hass, entry)
+    await _migrate_config_entry_title(hass, entry)
+    LOGGER.info("SolarEdge Optimizers: Starting setup for config entry: %s", entry.entry_id)
+    ha_timezone = dt_util.get_time_zone(hass.config.time_zone)
+    use_solaredge_one = entry.options.get(CONF_USE_SOLAREDGE_ONE, entry.data.get(CONF_USE_SOLAREDGE_ONE, True))
+    _log_setup_context(hass, entry, use_solaredge_one, ha_timezone)
+
+    api = SolarEdgeDualAPI(
+        entry.data["siteid"],
+        entry.data["username"],
+        entry.data["password"],
+        ha_timezone,
+        language=hass.config.language,
+        use_solaredge_one=use_solaredge_one,
+    )
+    coordinator_stored = False
+    try:
+        http_result_code = await _async_check_login(hass, api)
+        _validate_login_status(http_result_code)
+
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            LOGGER.debug("SolarEdge Optimizers: Login successful, creating coordinator")
+
+        hass.data.setdefault(DOMAIN, {})
+
+        # Pass config_entry to coordinator to enable async_config_entry_first_refresh()
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            LOGGER.debug("SolarEdge Optimizers: Creating coordinator instance")
+        coordinator = MyCoordinator(hass, api, True, entry)
+
+        # Fetch initial data so we have data when entities subscribe
+        #
+        # If the refresh fails, async_config_entry_first_refresh will
+        # raise ConfigEntryNotReady and setup will try again later
+        await _async_initial_refresh(coordinator)
+        # Mark setup as successful only after platform forwarding completes.
+        await _async_forward_platforms(hass, entry, coordinator)
+        coordinator_stored = True
+        LOGGER.info(
+            "SolarEdge Optimizers: Setup complete for entry %s (site %s)",
+            entry.entry_id,
+            entry.data.get("siteid"),
+        )
+        return True
+    finally:
+        if not coordinator_stored:
+            await _async_close_api_after_setup_failure(hass, api, entry.entry_id)
+
+
+def _entity_matches_entry(e: Any, entry_id: str) -> bool:
+    """Return True if entity (or registry entry) belongs to the given config entry."""
+    if e is None:
+        return False
+    if getattr(e, "config_entry_id", None) == entry_id:
+        return True
+    uid = getattr(e, "unique_id", None)
+    return uid is not None and str(uid).startswith(entry_id)
+
+
+def _collect_entity_ids_to_remove(ent_reg, entry_id: str) -> list[str]:
+    """Collect entity IDs in the registry that belong to this config entry (multiple HA paths)."""
+    to_remove: list[str] = []
+    if hasattr(ent_reg.entities, "get_entries_for_config_entry_id"):
+        for e in ent_reg.entities.get_entries_for_config_entry_id(entry_id):
+            to_remove.append(e.entity_id)
+    if not to_remove and hasattr(ent_reg.entities, "values"):
+        for entity in ent_reg.entities.values():
+            if _entity_matches_entry(entity, entry_id):
+                to_remove.append(entity.entity_id)
+    if not to_remove:
+        for maybe_key in ent_reg.entities:
+            entity = ent_reg.async_get(maybe_key) if hasattr(ent_reg, "async_get") else None
+            if entity is None and hasattr(ent_reg.entities, "data"):
+                entity = getattr(ent_reg.entities, "data", {}).get(maybe_key)
+            if _entity_matches_entry(entity, entry_id):
+                to_remove.append(getattr(entity, "entity_id", maybe_key))
+    return to_remove
+
+
+def _collect_device_ids_to_remove(dev_reg, entry: ConfigEntry, entry_id: str) -> list[str]:
+    """Collect device IDs in the registry that belong to this config entry (multiple HA paths)."""
+    dev_ids: list[str] = []
+    if hasattr(dev_reg.devices, "get_devices_for_config_entry_id"):
+        for dev in dev_reg.devices.get_devices_for_config_entry_id(entry_id):
+            dev_ids.append(dev.id)
+    if not dev_ids and hasattr(dev_reg.devices, "values"):
+        for device in dev_reg.devices.values():
+            if entry_id in device.config_entries:
+                dev_ids.append(device.id)
+    if not dev_ids:
+        siteid = (entry.data.get(CONF_SITE_ID) or "").strip()
+        if siteid:
+            site_dev = dev_reg.async_get_device(identifiers={(DOMAIN, f"site_{siteid}")})
+            if site_dev:
+                dev_ids.append(site_dev.id)
+    return dev_ids
+
+
+def _remove_entities_for_entry(ent_reg, entity_ids: list[str], entry_id: str) -> None:
+    """Remove the given entity IDs from the entity registry and log at debug."""
+    for eid in entity_ids:
+        ent_reg.async_remove(eid)
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            LOGGER.debug("SolarEdge Optimizers: Removed entity %s for config entry %s", eid, entry_id)
+
+
+def _remove_devices_for_entry(dev_reg, device_ids: list[str], entry_id: str) -> None:
+    """Remove the given device IDs from the device registry and log at debug."""
+    for did in device_ids:
+        dev_reg.async_remove_device(did)
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            LOGGER.debug("SolarEdge Optimizers: Removed device %s for config entry %s", did, entry_id)
+
+
+def _log_removal_result(entity_ids: list[str], device_ids: list[str], entry_id: str) -> None:
+    """Log summary or warning when no entities/devices were found to remove."""
+    if entity_ids or device_ids:
+        LOGGER.info(
+            "SolarEdge Optimizers: Removed %d entities and %d devices for entry %s",
+            len(entity_ids), len(device_ids), entry_id,
+        )
+    else:
+        LOGGER.warning(
+            "SolarEdge Optimizers: remove_entities_and_devices_for_entry found no entities or "
+            "devices to remove for entry %s. Delete the integration from Settings → Devices & "
+            "services → Integrations (not only from HACS) while the integration is still "
+            "installed so that cleanup can run.",
+            entry_id,
+        )
+
+
+def remove_entities_and_devices_for_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Remove all entities and devices for this config entry from entity and device registries.
+
+    Used by unload (when user removes the integration) and by config flow async_remove_entry.
+    Paths differ across Home Assistant versions; we try get_entries_for_config_entry_id /
+    get_devices_for_config_entry_id first, then fallbacks for older or different HA builds.
+    """
+    ent_reg = er.async_get(hass)
+    dev_reg = dr.async_get(hass)
+    entry_id = entry.entry_id
+    to_remove = _collect_entity_ids_to_remove(ent_reg, entry_id)
+    _remove_entities_for_entry(ent_reg, to_remove, entry_id)
+    dev_ids = _collect_device_ids_to_remove(dev_reg, entry, entry_id)
+    _remove_devices_for_entry(dev_reg, dev_ids, entry_id)
+    _log_removal_result(to_remove, dev_ids, entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry."""
-    if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        # AJT: 11-Jan-2026: Added cleanup of coordinator resources
-        coordinator = hass.data[DOMAIN].pop(entry.entry_id, None)
-        # AJT: 27-Jan-2026: Close API sessions to prevent file descriptor leaks
-        if coordinator and hasattr(coordinator, 'my_api'):
+    """Unload a config entry. Always closes API (releases file descriptors) and pops coordinator."""
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        LOGGER.debug("SolarEdge Optimizers: Unloading config entry %s", entry.entry_id)
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+    # Prefer shutdown before close so an in-flight coordinator refresh finishes first
+    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if coordinator is not None and hasattr(coordinator, "async_shutdown"):
+        try:
+            if LOGGER.isEnabledFor(logging.DEBUG):
+                LOGGER.debug(
+                    "SolarEdge Optimizers: Shutting down coordinator before API close for entry %s",
+                    entry.entry_id,
+                )
+            await coordinator.async_shutdown()
+        except Exception as e:  # pylint: disable=broad-except
+            LOGGER.warning(
+                "SolarEdge Optimizers: Error shutting down coordinator during unload: %s",
+                e,
+            )
+
+    # Always pop coordinator and close API so file descriptors are released even if platform unload failed
+    coordinator = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+    try:
+        if unload_ok:
+            try:
+                remove_entities_and_devices_for_entry(hass, entry)
+            except Exception as e:  # pylint: disable=broad-except
+                LOGGER.warning(
+                    "SolarEdge Optimizers: Error cleaning registries during unload: %s",
+                    e,
+                )
+    finally:
+        if coordinator is not None and hasattr(coordinator, "my_api"):
+            if LOGGER.isEnabledFor(logging.DEBUG):
+                LOGGER.debug(
+                    "SolarEdge Optimizers: Unload finally: closing API sessions for entry %s",
+                    entry.entry_id,
+                )
             try:
                 await hass.async_add_executor_job(coordinator.my_api.close)
-                if LOGGER.isEnabledFor(logging.DEBUG):
-                    LOGGER.debug("SolarEdge Optimizers: Closed API sessions during unload")
-            except Exception as e:
+            except Exception as e:  # pylint: disable=broad-except
                 LOGGER.warning("SolarEdge Optimizers: Error closing API sessions: %s", e)
 
+    if not unload_ok and LOGGER.isEnabledFor(logging.DEBUG):
+        LOGGER.debug(
+            "SolarEdge Optimizers: Platform unload failed or skipped for entry %s",
+            entry.entry_id,
+        )
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        LOGGER.debug(
+            "SolarEdge Optimizers: Unload complete for entry %s (unload_ok=%s)",
+            entry.entry_id,
+            unload_ok,
+        )
     return unload_ok
