@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "1",
+  "owner": "HuffYk",
+  "repo": "solaredgeoptimizers",
+  "visibility": "public",
+  "generatedAt": "2026-08-15T03:37:56.968Z",
+  "stats": {
+    "total": 0,
+    "day": 0,
+    "week": 0,
+    "month": 0
+  },
+  "partial": {
+    "day": true,
+    "week": true,
+    "month": true
+  },
+  "snapshots": {
+    "windowDays": 45,
+    "count": 1,
+    "firstDate": "2026-08-15",
+    "lastDate": "2026-08-15",
+    "series": {
+      "2026-08-15": 0
+    }
+  },
+  "profile": {
+    "defaultMode": "daily",
+    "hourlyEnabled": false
+  }
+}
