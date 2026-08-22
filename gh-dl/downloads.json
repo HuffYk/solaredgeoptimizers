@@ -3,7 +3,7 @@
   "owner": "HuffYk",
   "repo": "solaredgeoptimizers",
   "visibility": "public",
-  "generatedAt": "2026-08-21T03:49:39.277Z",
+  "generatedAt": "2026-08-22T03:40:24.306Z",
   "stats": {
     "total": 0,
     "day": 0,
@@ -12,14 +12,14 @@
   },
   "partial": {
     "day": false,
-    "week": true,
+    "week": false,
     "month": true
   },
   "snapshots": {
     "windowDays": 45,
-    "count": 7,
+    "count": 8,
     "firstDate": "2026-08-15",
-    "lastDate": "2026-08-21",
+    "lastDate": "2026-08-22",
     "series": {
       "2026-08-15": 0,
       "2026-08-16": 0,
@@ -27,7 +27,8 @@
       "2026-08-18": 0,
       "2026-08-19": 0,
       "2026-08-20": 0,
-      "2026-08-21": 0
+      "2026-08-21": 0,
+      "2026-08-22": 0
     }
   },
   "profile": {
